@@ -22,7 +22,9 @@ export function createApp(taskStore = store) {
     if (resource !== "tasks") return send(res, 404, { error: "Not found" });
 
     try {
-      if (req.method === "GET" && !id) return send(res, 200, taskStore.list());
+      if (req.method === "GET" && !id) {
+        return send(res, 200, taskStore.list({ overdue: url.searchParams.get("overdue") === "true" }));
+      }
       if (req.method === "POST" && !id) {
         return send(res, 201, taskStore.create(await readJson(req)));
       }

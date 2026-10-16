@@ -34,3 +34,12 @@ test("priority defaults to medium and rejects unknown values", () => {
   assert.equal(store.create({ title: "B", priority: "high" }).priority, "high");
   assert.throws(() => store.create({ title: "C", priority: "urgent" }), ValidationError);
 });
+
+test("list({ overdue: true }) returns only incomplete past-due tasks", () => {
+  const store = new TaskStore();
+  store.create({ title: "Late", dueDate: "2020-01-01T00:00:00Z" });
+  const done = store.create({ title: "Late but done", dueDate: "2020-01-01T00:00:00Z" });
+  store.update(done.id, { done: true });
+  store.create({ title: "Future", dueDate: "2999-01-01T00:00:00Z" });
+  assert.deepEqual(store.list({ overdue: true }).map((t) => t.title), ["Late"]);
+});

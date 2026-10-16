@@ -8,7 +8,7 @@ export class ValidationError extends Error {}
 export class TaskStore {
   #tasks = new Map();
 
-  create({ title, priority = "medium" }) {
+  create({ title, priority = "medium", dueDate = null }) {
     if (typeof title !== "string" || title.trim() === "") {
       throw new ValidationError("title is required");
     }
@@ -19,6 +19,7 @@ export class TaskStore {
       id: randomUUID(),
       title: title.trim(),
       priority,
+      dueDate,
       done: false,
       createdAt: new Date().toISOString(),
     };
@@ -30,8 +31,11 @@ export class TaskStore {
     return this.#tasks.get(id) ?? null;
   }
 
-  list() {
-    return [...this.#tasks.values()];
+  list({ overdue = false } = {}) {
+    const tasks = [...this.#tasks.values()];
+    if (!overdue) return tasks;
+    const now = Date.now();
+    return tasks.filter((t) => !t.done && t.dueDate && Date.parse(t.dueDate) < now);
   }
 
   update(id, changes) {
