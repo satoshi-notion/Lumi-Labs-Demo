@@ -1,7 +1,8 @@
 /**
  * gh-demo-worker: extends Notion's native GitHub Sync (PRs + issues) with
  * commits, releases, workflow runs, PR reviews, and agent tools that write
- * back to GitHub.
+ * back to GitHub. Each synced row also gets a page body (pageContentMarkdown)
+ * with the details that do not fit into properties.
  */
 import { Worker } from "@notionhq/workers"
 import * as Builder from "@notionhq/workers/builder"
@@ -26,6 +27,11 @@ const commits = worker.database("commits", {
       SHA: Schema.richText(),
       Author: Schema.richText(),
       Committed: Schema.date(),
+      Description: Schema.richText(),
+      "Files Changed": Schema.number(),
+      Additions: Schema.number(),
+      Deletions: Schema.number(),
+      "Pull Request": Schema.richText(),
       URL: Schema.url(),
     },
   },
@@ -42,6 +48,7 @@ const releases = worker.database("releases", {
       Tag: Schema.richText(),
       Published: Schema.date(),
       Prerelease: Schema.checkbox(),
+      Author: Schema.richText(),
       Notes: Schema.richText(),
       URL: Schema.url(),
     },
@@ -69,6 +76,9 @@ const runs = worker.database("runs", {
       ]),
       Branch: Schema.richText(),
       Event: Schema.richText(),
+      Actor: Schema.richText(),
+      Commit: Schema.richText(),
+      "Failed Step": Schema.richText(),
       Started: Schema.date(),
       URL: Schema.url(),
     },
@@ -84,19 +94,29 @@ const reviews = worker.database("reviews", {
       Review: Schema.title(),
       "Review ID": Schema.richText(),
       "PR Number": Schema.number(),
+      "PR Title": Schema.richText(),
       Reviewer: Schema.richText(),
       State: Schema.select([
         { name: "APPROVED", color: "green" },
         { name: "CHANGES_REQUESTED", color: "red" },
         { name: "COMMENTED", color: "gray" },
       ]),
+      Comment: Schema.richText(),
+      "Inline Comments": Schema.number(),
       Submitted: Schema.date(),
       URL: Schema.url(),
     },
   },
 })
 
-// -- Syncs: 5m deltas with a daily full replace so first import is automatic --
+// -- Helpers --
+
+const clip = (s: string | null | undefined, n = 1900) => (s ?? "").slice(0, n)
+
+/** "Title\n\nBody" -> body text (without the subject line). */
+const commitBody = (message: string) => message.split("\n").slice(1).join("\n").trim()
+
+// -- Syncs: 5m deltas + daily full replace so the first import is automatic --
 
 type Mode = "replace" | "incremental"
 const SCHEDULES: Array<[Mode, "5m" | "1d"]> = [
@@ -104,11 +124,18 @@ const SCHEDULES: Array<[Mode, "5m" | "1d"]> = [
   ["replace", "1d"],
 ]
 
+type Change = {
+  key: string
+  properties: Record<string, any>
+  pageContentMarkdown?: string
+  upstreamUpdatedAt?: string
+}
+
 function defineSync<T>(
   name: string,
   database: ReturnType<typeof worker.database>,
   fetchPage: (page: number) => Promise<{ items: T[]; hasMore: boolean }>,
-  toChange: (item: T) => { key: string; properties: Record<string, any> } | null,
+  toChange: (item: T) => Promise<Change | null> | Change | null,
 ) {
   for (const [mode, schedule] of SCHEDULES) {
     worker.sync(`${name}${mode === "replace" ? "Full" : "Delta"}`, {
@@ -119,70 +146,139 @@ function defineSync<T>(
         const page = state?.page ?? 1
         await githubApi.wait()
         const { items, hasMore } = await fetchPage(page)
-        const changes = items.flatMap((item) => {
-          const c = toChange(item)
-          return c ? [{ type: "upsert" as const, ...c }] : []
-        })
+        const changes = []
+        for (const item of items) {
+          const c = await toChange(item)
+          if (c) changes.push({ type: "upsert" as const, ...c })
+        }
         return { changes, hasMore, nextState: hasMore ? { page: page + 1 } : undefined }
       },
     })
   }
 }
 
+// Commits: the list endpoint has no diff info, so fetch each commit's detail.
 defineSync<any>(
   "commits",
   commits,
   (page) => ghPage("/commits", page),
-  (c) => ({
-    key: c.sha,
-    properties: {
-      Message: Builder.title(String(c.commit.message).split("\n")[0]),
-      SHA: Builder.richText(c.sha.slice(0, 7)),
-      Author: Builder.richText(c.commit.author?.name ?? c.author?.login ?? "unknown"),
-      Committed: Builder.dateTime(c.commit.author.date),
-      URL: Builder.url(c.html_url),
-    },
-  }),
+  async (summary) => {
+    await githubApi.wait()
+    const c = await gh<any>(`/commits/${summary.sha}`)
+    // PRs that contain this commit (squash merges link back to the PR).
+    await githubApi.wait()
+    const prs = await gh<any[]>(`/commits/${c.sha}/pulls`).catch(() => [])
+    const files: any[] = c.files ?? []
+    const body = commitBody(c.commit.message)
+    const md = [
+      `## ${String(c.commit.message).split("\n")[0]}`,
+      body && `\n${body}`,
+      `\n**Author:** ${c.commit.author?.name ?? "unknown"} (${c.author?.login ?? "n/a"})`,
+      `**Commit:** [\`${c.sha.slice(0, 7)}\`](${c.html_url})`,
+      prs.length ? `**Pull request:** ${prs.map((p) => `[#${p.number} ${p.title}](${p.html_url})`).join(", ")}` : "",
+      `\n### Changes (+${c.stats?.additions ?? 0} / -${c.stats?.deletions ?? 0} in ${files.length} files)`,
+      "",
+      "| File | Status | + | - |",
+      "| --- | --- | --- | --- |",
+      ...files.slice(0, 50).map((f) => `| \`${f.filename}\` | ${f.status} | ${f.additions} | ${f.deletions} |`),
+    ]
+      .join("\n")
+    return {
+      key: c.sha,
+      upstreamUpdatedAt: c.commit.author?.date,
+      properties: {
+        Message: Builder.title(String(c.commit.message).split("\n")[0]),
+        SHA: Builder.richText(c.sha.slice(0, 7)),
+        Author: Builder.richText(c.commit.author?.name ?? c.author?.login ?? "unknown"),
+        Committed: Builder.dateTime(c.commit.author.date),
+        Description: Builder.richText(clip(body)),
+        "Files Changed": Builder.number(files.length),
+        Additions: Builder.number(c.stats?.additions ?? 0),
+        Deletions: Builder.number(c.stats?.deletions ?? 0),
+        "Pull Request": Builder.richText(prs.map((p) => `#${p.number}`).join(", ")),
+        URL: Builder.url(c.html_url),
+      },
+      pageContentMarkdown: md,
+    }
+  },
 )
 
+// Releases: release notes become the page body.
 defineSync<any>(
   "releases",
   releases,
   (page) => ghPage("/releases", page),
   (r) => ({
     key: String(r.id),
+    upstreamUpdatedAt: r.published_at ?? r.created_at,
     properties: {
       Name: Builder.title(r.name || r.tag_name),
       "Release ID": Builder.richText(String(r.id)),
       Tag: Builder.richText(r.tag_name),
       Published: Builder.dateTime(r.published_at ?? r.created_at),
       Prerelease: Builder.checkbox(Boolean(r.prerelease)),
-      Notes: Builder.richText((r.body ?? "").slice(0, 1900)),
+      Author: Builder.richText(r.author?.login ?? ""),
+      Notes: Builder.richText(clip(r.body)),
       URL: Builder.url(r.html_url),
     },
+    pageContentMarkdown: [
+      `## ${r.name || r.tag_name}${r.prerelease ? " (pre-release)" : ""}`,
+      `\n**Tag:** \`${r.tag_name}\` · **Target:** \`${r.target_commitish}\` · [View on GitHub](${r.html_url})`,
+      `\n${r.body || "_No release notes._"}`,
+    ].join("\n"),
   }),
 )
 
+// Workflow runs: jobs and steps (with the failing step called out).
 defineSync<any>(
   "runs",
   runs,
   (page) => ghPage("/actions/runs", page, "workflow_runs"),
-  (r) => ({
-    key: String(r.id),
-    properties: {
-      Run: Builder.title(`${r.name} #${r.run_number}: ${r.display_title}`),
-      "Run ID": Builder.richText(String(r.id)),
-      Status: Builder.select(r.status),
-      ...(r.conclusion ? { Conclusion: Builder.select(r.conclusion) } : {}),
-      Branch: Builder.richText(r.head_branch ?? ""),
-      Event: Builder.richText(r.event),
-      Started: Builder.dateTime(r.run_started_at ?? r.created_at),
-      URL: Builder.url(r.html_url),
-    },
-  }),
+  async (r) => {
+    await githubApi.wait()
+    const { jobs } = await gh<any>(`/actions/runs/${r.id}/jobs`).catch(() => ({ jobs: [] }))
+    const failed = jobs
+      .flatMap((job: any) =>
+        (job.steps ?? []).filter((s: any) => s.conclusion === "failure").map((s: any) => `${job.name} › ${s.name}`),
+      )
+      .join(", ")
+    const icon = (c: string | null) =>
+      c === "success" ? "✅" : c === "failure" ? "❌" : c === "skipped" ? "⏭️" : c === "cancelled" ? "🚫" : "⏳"
+    const md = [
+      `## ${r.name} #${r.run_number}`,
+      `\n${icon(r.conclusion)} **${r.conclusion ?? r.status}** · event \`${r.event}\` · branch \`${r.head_branch}\``,
+      `\n**Commit:** \`${r.head_sha.slice(0, 7)}\` ${String(r.head_commit?.message ?? "").split("\n")[0]}`,
+      `**Triggered by:** ${r.triggering_actor?.login ?? r.actor?.login ?? "unknown"} · [View run](${r.html_url})`,
+      failed ? `\n> ❌ **Failed step:** ${failed}` : "",
+      "\n### Jobs",
+      ...jobs.flatMap((job: any) => [
+        `\n**${icon(job.conclusion)} ${job.name}**`,
+        ...(job.steps ?? []).map((s: any) => `- ${icon(s.conclusion)} ${s.name}`),
+      ]),
+    ].join("\n")
+    return {
+      key: String(r.id),
+      upstreamUpdatedAt: r.updated_at,
+      properties: {
+        Run: Builder.title(`${r.name} #${r.run_number}: ${r.display_title}`),
+        "Run ID": Builder.richText(String(r.id)),
+        Status: Builder.select(r.status),
+        ...(r.conclusion ? { Conclusion: Builder.select(r.conclusion) } : {}),
+        Branch: Builder.richText(r.head_branch ?? ""),
+        Event: Builder.richText(r.event),
+        Actor: Builder.richText(r.triggering_actor?.login ?? r.actor?.login ?? ""),
+        Commit: Builder.richText(r.head_sha.slice(0, 7)),
+        "Failed Step": Builder.richText(failed),
+        Started: Builder.dateTime(r.run_started_at ?? r.created_at),
+        URL: Builder.url(r.html_url),
+      },
+      pageContentMarkdown: md,
+    }
+  },
 )
 
-// Reviews are per PR, so walk all PRs and flatten their reviews into one page.
+// Reviews per PR: walk all PRs and flatten their reviews into one page,
+// including the review body and inline (line-level) comments.
 defineSync<any>(
   "reviews",
   reviews,
@@ -192,25 +288,41 @@ defineSync<any>(
     for (const pr of prs.items) {
       await githubApi.wait()
       const list = await gh<any[]>(`/pulls/${pr.number}/reviews`)
-      items.push(...list.map((r) => ({ ...r, pr })))
+      for (const r of list) {
+        if (!r.submitted_at) continue
+        await githubApi.wait()
+        const inline = await gh<any[]>(`/pulls/${pr.number}/reviews/${r.id}/comments`).catch(() => [])
+        items.push({ ...r, pr, inline })
+      }
     }
     return { items, hasMore: prs.hasMore }
   },
-  (r) =>
-    r.submitted_at
-      ? {
-          key: String(r.id),
-          properties: {
-            Review: Builder.title(`PR #${r.pr.number} ${r.state} by ${r.user.login}`),
-            "Review ID": Builder.richText(String(r.id)),
-            "PR Number": Builder.number(r.pr.number),
-            Reviewer: Builder.richText(r.user.login),
-            State: Builder.select(r.state),
-            Submitted: Builder.dateTime(r.submitted_at),
-            URL: Builder.url(r.html_url),
-          },
-        }
-      : null,
+  (r) => ({
+    key: String(r.id),
+    upstreamUpdatedAt: r.submitted_at,
+    properties: {
+      Review: Builder.title(`PR #${r.pr.number} ${r.state} by ${r.user.login}`),
+      "Review ID": Builder.richText(String(r.id)),
+      "PR Number": Builder.number(r.pr.number),
+      "PR Title": Builder.richText(r.pr.title),
+      Reviewer: Builder.richText(r.user.login),
+      State: Builder.select(r.state),
+      Comment: Builder.richText(clip(r.body)),
+      "Inline Comments": Builder.number(r.inline.length),
+      Submitted: Builder.dateTime(r.submitted_at),
+      URL: Builder.url(r.html_url),
+    },
+    pageContentMarkdown: [
+      `## ${r.state} on [PR #${r.pr.number}: ${r.pr.title}](${r.pr.html_url})`,
+      `\n**Reviewer:** ${r.user.login} · [View review](${r.html_url})`,
+      `\n${r.body ? r.body : "_No review summary._"}`,
+      r.inline.length ? "\n### Inline comments" : "",
+      ...r.inline.map(
+        (c: any) =>
+          `\n**\`${c.path}${c.line ? `:${c.line}` : ""}\`**\n\n> ${String(c.body).split("\n").join("\n> ")}\n\n\`\`\`diff\n${clip(c.diff_hunk, 600)}\n\`\`\``,
+      ),
+    ].join("\n"),
+  }),
 )
 
 // -- Agent tools: Notion -> GitHub (the native sync is one-way) --
