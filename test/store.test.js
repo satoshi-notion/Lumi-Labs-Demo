@@ -27,3 +27,10 @@ test("create rejects a missing or blank title", () => {
   assert.throws(() => store.create({}), ValidationError);
   assert.throws(() => store.create({ title: "   " }), ValidationError);
 });
+
+test("priority defaults to medium and rejects unknown values", () => {
+  const store = new TaskStore();
+  assert.equal(store.create({ title: "A" }).priority, "medium");
+  assert.equal(store.create({ title: "B", priority: "high" }).priority, "high");
+  assert.throws(() => store.create({ title: "C", priority: "urgent" }), ValidationError);
+});

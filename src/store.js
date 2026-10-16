@@ -1,18 +1,24 @@
 import { randomUUID } from "node:crypto";
 
+export const PRIORITIES = ["low", "medium", "high"];
+
 export class ValidationError extends Error {}
 
 /** In-memory task store. Swap for a database later. */
 export class TaskStore {
   #tasks = new Map();
 
-  create({ title }) {
+  create({ title, priority = "medium" }) {
     if (typeof title !== "string" || title.trim() === "") {
       throw new ValidationError("title is required");
+    }
+    if (!PRIORITIES.includes(priority)) {
+      throw new ValidationError(`priority must be one of: ${PRIORITIES.join(", ")}`);
     }
     const task = {
       id: randomUUID(),
       title: title.trim(),
+      priority,
       done: false,
       createdAt: new Date().toISOString(),
     };
