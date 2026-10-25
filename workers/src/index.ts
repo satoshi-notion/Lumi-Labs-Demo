@@ -24,7 +24,9 @@ const commits = worker.database("commits", {
   schema: {
     properties: {
       Message: Schema.title(),
+      // Full SHA: must equal the sync key, otherwise every run creates duplicates.
       SHA: Schema.richText(),
+      "Short SHA": Schema.richText(),
       Author: Schema.richText(),
       Committed: Schema.date(),
       Description: Schema.richText(),
@@ -78,6 +80,7 @@ const runs = worker.database("runs", {
       Event: Schema.richText(),
       Actor: Schema.richText(),
       Commit: Schema.richText(),
+      "Commit Record": Schema.relation("commits", { twoWay: true, relatedPropertyName: "Workflow Runs" }),
       "Failed Step": Schema.richText(),
       Started: Schema.date(),
       URL: Schema.url(),
@@ -188,7 +191,8 @@ defineSync<any>(
       upstreamUpdatedAt: c.commit.author?.date,
       properties: {
         Message: Builder.title(String(c.commit.message).split("\n")[0]),
-        SHA: Builder.richText(c.sha.slice(0, 7)),
+        SHA: Builder.richText(c.sha),
+        "Short SHA": Builder.richText(c.sha.slice(0, 7)),
         Author: Builder.richText(c.commit.author?.name ?? c.author?.login ?? "unknown"),
         Committed: Builder.dateTime(c.commit.author.date),
         Description: Builder.richText(clip(body)),
@@ -242,6 +246,11 @@ defineSync<any>(
         (job.steps ?? []).filter((s: any) => s.conclusion === "failure").map((s: any) => `${job.name} › ${s.name}`),
       )
       .join(", ")
+    // Relate to the Commits database only for commits that exist on main
+    // (PR branch commits are not synced there).
+    const onMain = await gh<any>(`/compare/main...${r.head_sha}`)
+      .then((c) => c.status === "behind" || c.status === "identical")
+      .catch(() => false)
     const icon = (c: string | null) =>
       c === "success" ? "✅" : c === "failure" ? "❌" : c === "skipped" ? "⏭️" : c === "cancelled" ? "🚫" : "⏳"
     const md = [
@@ -268,6 +277,7 @@ defineSync<any>(
         Event: Builder.richText(r.event),
         Actor: Builder.richText(r.triggering_actor?.login ?? r.actor?.login ?? ""),
         Commit: Builder.richText(r.head_sha.slice(0, 7)),
+        ...(onMain ? { "Commit Record": [Builder.relation(r.head_sha)] } : {}),
         "Failed Step": Builder.richText(failed),
         Started: Builder.dateTime(r.run_started_at ?? r.created_at),
         URL: Builder.url(r.html_url),
