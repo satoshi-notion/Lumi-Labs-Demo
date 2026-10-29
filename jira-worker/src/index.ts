@@ -8,7 +8,8 @@ import { Worker } from "@notionhq/workers"
 import * as Builder from "@notionhq/workers/builder"
 import * as Schema from "@notionhq/workers/schema"
 import { j } from "@notionhq/workers/schema-builder"
-import { BASE_URL, adfToText, jira, searchIssues, textToAdf } from "./jira.js"
+import { registerUseCases } from "./usecases.js"
+import { BASE_URL, adfToText, customFieldIds, jira, searchIssues, storyPoints, textToAdf } from "./jira.js"
 
 const worker = new Worker()
 export default worker
@@ -115,6 +116,57 @@ const worklogs = worker.database("worklogs", {
   },
 })
 
+
+// Project Points: per-space rollup of story points. Task Points: one row per work item.
+const projectPoints = worker.database("projectPoints", {
+  type: "managed",
+  initialTitle: "jira-demo Project Points",
+  primaryKeyProperty: "Project Key",
+  schema: {
+    properties: {
+      Project: Schema.title(),
+      "Project Key": Schema.richText(),
+      "Total Points": Schema.number(),
+      "Done Points": Schema.number(),
+      "In Progress Points": Schema.number(),
+      "To Do Points": Schema.number(),
+      "Done %": Schema.number(),
+      "Work Items": Schema.number(),
+      "Unestimated Items": Schema.number(),
+      URL: Schema.url(),
+    },
+  },
+})
+
+const taskPoints = worker.database("taskPoints", {
+  type: "managed",
+  initialTitle: "jira-demo Task Points",
+  primaryKeyProperty: "Work Item",
+  schema: {
+    properties: {
+      Task: Schema.title(),
+      "Work Item": Schema.richText(),
+      "Story Points": Schema.number(),
+      Estimated: Schema.checkbox(),
+      Status: Schema.select([]),
+      "Status Category": Schema.select([
+        { name: "To Do", color: "gray" },
+        { name: "In Progress", color: "blue" },
+        { name: "Done", color: "green" },
+      ]),
+      Type: Schema.select([]),
+      Assignee: Schema.richText(),
+      Sprint: Schema.richText(),
+      Parent: Schema.richText(),
+      "Original Estimate (h)": Schema.number(),
+      "Time Spent (h)": Schema.number(),
+      Updated: Schema.date(),
+      URL: Schema.url(),
+      "Project Record": Schema.relation("projectPoints", { twoWay: true, relatedPropertyName: "Tasks" }),
+    },
+  },
+})
+
 // -- Syncs: 5m deltas + daily full replace so the first import is automatic --
 
 type Mode = "replace" | "incremental"
@@ -136,8 +188,9 @@ function defineSync<T>(
   database: ReturnType<typeof worker.database>,
   fetchPage: (mode: Mode, token?: string) => Promise<{ items: T[]; nextToken?: string }>,
   toChanges: (item: T) => Change[],
+  schedules = SCHEDULES,
 ) {
-  for (const [mode, schedule] of SCHEDULES) {
+  for (const [mode, schedule] of schedules) {
     worker.sync(`${name}${mode === "replace" ? "Full" : "Delta"}`, {
       database,
       mode,
@@ -356,6 +409,126 @@ defineSync<any>(
     },
   ],
 )
+
+
+const POINT_FIELDS = (ids: { points: string[]; sprint?: string }) =>
+  ["summary", "status", "project", "issuetype", "assignee", "parent", "updated", "timeoriginalestimate", "timespent", ...ids.points, ids.sprint]
+    .filter(Boolean)
+    .join(",")
+const hours = (sec?: number | null) => Math.round(((sec ?? 0) / 3600) * 100) / 100
+
+// Task Points: story points per work item (Full: all, Delta: updated in last day).
+defineSync<any>(
+  "taskPoints",
+  taskPoints,
+  async (mode, token) => {
+    const ids = await customFieldIds()
+    await jiraApi.wait()
+    const { issues, nextPageToken } = await searchIssues(issueJql(mode), token, 50, POINT_FIELDS(ids))
+    return { items: issues.map((i) => ({ ...i, ids })), nextToken: nextPageToken }
+  },
+  (i) => {
+    const f = i.fields
+    const points = storyPoints(f, i.ids)
+    const sprints: any[] = (i.ids.sprint && f[i.ids.sprint]) || []
+    const sprint = sprints.find((s) => s.state === "active") ?? sprints[sprints.length - 1]
+    return [
+      {
+        key: i.key,
+        upstreamUpdatedAt: f.updated,
+        properties: {
+          Task: Builder.title(`${i.key}: ${f.summary ?? ""}`),
+          "Work Item": Builder.richText(i.key),
+          "Story Points": Builder.number(points ?? 0),
+          Estimated: Builder.checkbox(points != null),
+          Status: Builder.select(f.status?.name ?? "Unknown"),
+          "Status Category": Builder.select(
+            ({ new: "To Do", indeterminate: "In Progress", done: "Done" } as Record<string, string>)[f.status?.statusCategory?.key] ?? "To Do",
+          ),
+          Type: Builder.select(f.issuetype?.name ?? "Task"),
+          Assignee: Builder.richText(f.assignee?.displayName ?? "Unassigned"),
+          Sprint: Builder.richText(sprint?.name ?? ""),
+          Parent: Builder.richText(f.parent?.key ?? ""),
+          "Original Estimate (h)": Builder.number(hours(f.timeoriginalestimate)),
+          "Time Spent (h)": Builder.number(hours(f.timespent)),
+          Updated: Builder.dateTime(f.updated),
+          URL: Builder.url(browse(i.key)),
+          "Project Record": [Builder.relation(f.project?.key ?? "")],
+        },
+        pageContentMarkdown: [
+          `## [${i.key} ${f.summary ?? ""}](${browse(i.key)})`,
+          `\n**Story points:** ${points ?? "_not estimated_"} · **Status:** ${f.status?.name ?? "?"} · **Assignee:** ${f.assignee?.displayName ?? "Unassigned"}`,
+          sprint ? `**Sprint:** ${sprint.name} (${sprint.state})` : "",
+          f.parent ? `**Parent:** ${f.parent.key} ${f.parent.fields?.summary ?? ""}` : "",
+        ].filter(Boolean).join("\n"),
+      },
+    ]
+  },
+)
+
+// Project Points: aggregates every work item per space, so each run rescans all issues.
+// Row counts are small for a demo; for large sites, page this by project via state.
+defineSync<any>(
+  "projectPoints",
+  projectPoints,
+  async () => {
+    const ids = await customFieldIds()
+    await jiraApi.wait()
+    const projects = (await jira<any>("/rest/api/3/project/search?maxResults=100")).values ?? []
+    const items: any[] = []
+    for (const p of projects) {
+      const agg = { total: 0, done: 0, progress: 0, todo: 0, items: 0, unestimated: 0 }
+      let token: string | undefined
+      do {
+        await jiraApi.wait()
+        const page = await searchIssues(`project = "${p.key}" ORDER BY created ASC`, token, 100, POINT_FIELDS(ids))
+        for (const i of page.issues) {
+          const pts = storyPoints(i.fields, ids)
+          const cat = i.fields.status?.statusCategory?.key
+          agg.items++
+          if (pts == null) agg.unestimated++
+          agg.total += pts ?? 0
+          if (cat === "done") agg.done += pts ?? 0
+          else if (cat === "indeterminate") agg.progress += pts ?? 0
+          else agg.todo += pts ?? 0
+        }
+        token = page.nextPageToken
+      } while (token)
+      items.push({ ...p, agg })
+    }
+    return { items }
+  },
+  (p) => {
+    const a = p.agg
+    const pct = a.total ? Math.round((a.done / a.total) * 100) : 0
+    return [
+      {
+        key: p.key,
+        properties: {
+          Project: Builder.title(`${p.key} – ${p.name}`),
+          "Project Key": Builder.richText(p.key),
+          "Total Points": Builder.number(a.total),
+          "Done Points": Builder.number(a.done),
+          "In Progress Points": Builder.number(a.progress),
+          "To Do Points": Builder.number(a.todo),
+          "Done %": Builder.number(pct),
+          "Work Items": Builder.number(a.items),
+          "Unestimated Items": Builder.number(a.unestimated),
+          URL: Builder.url(`${BASE_URL}/jira/software/projects/${p.key}/summary`),
+        },
+        pageContentMarkdown: [
+          `## ${p.name} (${p.key}) — ${pct}% done`,
+          `\n| Status category | Points |\n| --- | --- |\n| Done | ${a.done} |\n| In Progress | ${a.progress} |\n| To Do | ${a.todo} |\n| **Total** | **${a.total}** |`,
+          `\n${a.items} work items, ${a.unestimated} without a story point estimate.`,
+          `\n[Open in Jira](${BASE_URL}/jira/software/projects/${p.key}/summary)`,
+        ].join("\n"),
+      },
+    ]
+  },
+)
+
+// -- Use-case syncs: several endpoints merged per database, linked by relations --
+registerUseCases(worker, jiraApi)
 
 // -- Agent tools: Notion <-> Jira (the built-in sync is one-way) --
 
