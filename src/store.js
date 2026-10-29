@@ -2,6 +2,8 @@ import { randomUUID } from "node:crypto";
 
 export const PRIORITIES = ["low", "medium", "high"];
 
+const UPDATABLE_FIELDS = ["title", "done", "priority"];
+
 export class ValidationError extends Error {}
 
 /** In-memory task store. Swap for a database later. */
@@ -37,7 +39,9 @@ export class TaskStore {
   update(id, changes) {
     const task = this.#tasks.get(id);
     if (!task) return null;
-    Object.assign(task, changes);
+    for (const key of UPDATABLE_FIELDS) {
+      if (key in changes) task[key] = changes[key];
+    }
     return task;
   }
 
