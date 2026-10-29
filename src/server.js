@@ -19,6 +19,7 @@ export function createApp(taskStore = store) {
     const url = new URL(req.url, "http://localhost");
     const [, resource, id] = url.pathname.split("/");
 
+    if (resource === "health" && req.method === "GET") return send(res, 200, { status: "ok" });
     if (resource !== "tasks") return send(res, 404, { error: "Not found" });
 
     try {

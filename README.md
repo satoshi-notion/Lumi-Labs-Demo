@@ -19,6 +19,7 @@ npm test         # runs the test suite
 | GET    | `/tasks/:id` | Fetch a task        |
 | PATCH  | `/tasks/:id` | Update a task       |
 | DELETE | `/tasks/:id` | Delete a task       |
+| GET    | `/health`    | Liveness check      |
 
 ## Roadmap
 
