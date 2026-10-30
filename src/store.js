@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 export const PRIORITIES = ["low", "medium", "high"];
 
 export class ValidationError extends Error {}
+export class BadJsonError extends Error {}
 
 /** In-memory task store. Swap for a database later. */
 export class TaskStore {
