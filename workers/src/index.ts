@@ -1,5 +1,5 @@
 /**
- * gh-demo-worker: extends Notion's native GitHub Sync (PRs + issues) with
+ * GitHub worker: extends Notion's native GitHub Sync (PRs + issues) with
  * commits, releases, workflow runs, PR reviews, and agent tools that write
  * back to GitHub. Each synced row also gets a page body (pageContentMarkdown)
  * with the details that do not fit into properties.
@@ -9,17 +9,20 @@ import * as Builder from "@notionhq/workers/builder"
 import * as Schema from "@notionhq/workers/schema"
 import { j } from "@notionhq/workers/schema-builder"
 import { REPO, gh, ghPage } from "./github.js"
+import { registerUseCases } from "./usecases.js"
 
 const worker = new Worker()
 export default worker
 
 const githubApi = worker.pacer("githubApi", { allowedRequests: 10, intervalMs: 1000 })
 
+registerUseCases(worker, githubApi)
+
 // -- Databases (managed; move them under the demo page after first deploy) --
 
 const commits = worker.database("commits", {
   type: "managed",
-  initialTitle: "gh-demo Commits",
+  initialTitle: "Commits",
   primaryKeyProperty: "SHA",
   schema: {
     properties: {
@@ -41,7 +44,7 @@ const commits = worker.database("commits", {
 
 const releases = worker.database("releases", {
   type: "managed",
-  initialTitle: "gh-demo Releases",
+  initialTitle: "Releases",
   primaryKeyProperty: "Release ID",
   schema: {
     properties: {
@@ -59,7 +62,7 @@ const releases = worker.database("releases", {
 
 const runs = worker.database("runs", {
   type: "managed",
-  initialTitle: "gh-demo Workflow Runs",
+  initialTitle: "Workflow Runs",
   primaryKeyProperty: "Run ID",
   schema: {
     properties: {
@@ -90,7 +93,7 @@ const runs = worker.database("runs", {
 
 const reviews = worker.database("reviews", {
   type: "managed",
-  initialTitle: "gh-demo PR Reviews",
+  initialTitle: "PR Reviews",
   primaryKeyProperty: "Review ID",
   schema: {
     properties: {
