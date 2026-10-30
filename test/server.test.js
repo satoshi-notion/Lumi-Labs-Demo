@@ -21,3 +21,21 @@ test("GET /health returns ok", async () => {
     assert.deepEqual(await res.json(), { status: "ok" });
   });
 });
+
+test("POST /tasks with malformed JSON returns 400", async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/tasks`, { method: "POST", body: "{not json" });
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /valid JSON/);
+  });
+});
+
+test("POST /tasks with a valid body still returns 201", async () => {
+  await withServer(async (base) => {
+    const res = await fetch(`${base}/tasks`, {
+      method: "POST",
+      body: JSON.stringify({ title: "Write tests" }),
+    });
+    assert.equal(res.status, 201);
+  });
+});
