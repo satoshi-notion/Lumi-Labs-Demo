@@ -34,3 +34,14 @@ test("priority defaults to medium and rejects unknown values", () => {
   assert.equal(store.create({ title: "B", priority: "high" }).priority, "high");
   assert.throws(() => store.create({ title: "C", priority: "urgent" }), ValidationError);
 });
+
+test("list filters by priority and done", () => {
+  const store = new TaskStore();
+  store.create({ title: "a", priority: "high" });
+  const b = store.create({ title: "b", priority: "low" });
+  store.update(b.id, { done: true });
+  assert.equal(store.list({ priority: "high" }).length, 1);
+  assert.equal(store.list({ done: true }).length, 1);
+  assert.equal(store.list({ priority: "high", done: true }).length, 0);
+  assert.equal(store.list().length, 2);
+});

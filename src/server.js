@@ -22,7 +22,13 @@ export function createApp(taskStore = store) {
     if (resource !== "tasks") return send(res, 404, { error: "Not found" });
 
     try {
-      if (req.method === "GET" && !id) return send(res, 200, taskStore.list());
+      if (req.method === "GET" && !id) {
+        const q = url.searchParams;
+        return send(res, 200, taskStore.list({
+          priority: q.get("priority") ?? undefined,
+          done: q.has("done") ? q.get("done") === "true" : undefined,
+        }));
+      }
       if (req.method === "POST" && !id) {
         return send(res, 201, taskStore.create(await readJson(req)));
       }
