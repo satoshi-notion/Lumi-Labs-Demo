@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { TaskStore, ValidationError } from "./store.js";
+import { TaskStore, ValidationError, BadJsonError } from "./store.js";
 
 const store = new TaskStore();
 
@@ -11,7 +11,12 @@ function send(res, status, body) {
 async function readJson(req) {
   let raw = "";
   for await (const chunk of req) raw += chunk;
-  return raw ? JSON.parse(raw) : {};
+  if (!raw) return {};
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new BadJsonError("Request body must be valid JSON");
+  }
 }
 
 export function createApp(taskStore = store) {
@@ -41,8 +46,11 @@ export function createApp(taskStore = store) {
       }
       send(res, 405, { error: "Method not allowed" });
     } catch (err) {
-      const message = err instanceof ValidationError ? err.message : "Invalid JSON";
-      send(res, 400, { error: message });
+      if (err instanceof ValidationError || err instanceof BadJsonError) {
+        return send(res, 400, { error: err.message });
+      }
+      console.error(err);
+      send(res, 500, { error: "Internal server error" });
     }
   });
 }
