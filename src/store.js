@@ -30,8 +30,12 @@ export class TaskStore {
     return this.#tasks.get(id) ?? null;
   }
 
-  list() {
-    return [...this.#tasks.values()];
+  list({ priority, done } = {}) {
+    return [...this.#tasks.values()].filter(
+      (t) =>
+        (priority === undefined || t.priority === priority) &&
+        (done === undefined || t.done === done),
+    );
   }
 
   update(id, changes) {
