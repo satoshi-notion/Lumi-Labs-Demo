@@ -18,7 +18,21 @@ export default worker
 const jiraApi = worker.pacer("jiraApi", { allowedRequests: 10, intervalMs: 1000 })
 
 const browse = (key: string) => `${BASE_URL}/browse/${key}`
+/** Select options are fixed in the schema; values outside a list fall back to "Other". */
+const STATUSES = ["To Do", "未着手", "進行中", "品質保証", "完了", "Stuck", "In Progress", "Done", "Unknown"]
+const TYPES = ["エピック", "ストーリー", "タスク", "バグ", "ワークストリーム", "Subtask", "Epic", "Story", "Task", "Bug"]
+const PRIORITIES = ["Highest", "High", "Medium", "Low", "Lowest", "None"]
+const LINK_TYPES = ["Blocks", "Relates", "Duplicate", "Clones"]
+const PEOPLE = ["Melanie Harrington", "Marta Giambrone", "Antoine Richert", "Bret Scofield", "Edward Leblanc", "Sales demo", "Renee Ward", "Holly Turay", "Satoshi Suzuki", "Oriana Munoz", "Joseph Roberts", "Alice Antonelli", "Ana Haubold", "Stephanie Lee", "Sandra Lukac", "austen", "Juan Gomez", "Emily Zhang", "Sales Demo - Microsoft", "Unassigned"]
+const opts = (names: string[]) => [...names, "Other"].map((name) => ({ name }))
+const pick = (value: string | null | undefined, names: string[]) =>
+	value && names.includes(value) ? value : "Other"
+
 const clip = (s: string | null | undefined, n = 1900) => (s ?? "").slice(0, n)
+
+/** Bump when a schema or value format changes, so unchanged rows are rewritten once. */
+const SCHEMA_REV = "2026-10-30T18:00:00.000Z"
+const stamp = (d?: string) => (d && new Date(d) > new Date(SCHEMA_REV) ? d : SCHEMA_REV)
 
 // -- Databases (managed; move them under the demo page after first deploy) --
 
@@ -32,7 +46,8 @@ const comments = worker.database("comments", {
       "Comment ID": Schema.richText(),
       "Work Item": Schema.richText(),
       "Work Item Summary": Schema.richText(),
-      Author: Schema.richText(),
+      Author: Schema.select(opts(PEOPLE)),
+      Task: Schema.relation("taskPoints", { twoWay: true, relatedPropertyName: "Comments" }),
       Created: Schema.date(),
       Updated: Schema.date(),
       URL: Schema.url(),
@@ -50,9 +65,10 @@ const statusHistory = worker.database("statusHistory", {
       "Change ID": Schema.richText(),
       "Work Item": Schema.richText(),
       "Work Item Summary": Schema.richText(),
-      From: Schema.select([]),
-      To: Schema.select([]),
-      "Changed By": Schema.richText(),
+      From: Schema.select(opts(STATUSES)),
+      To: Schema.select(opts(STATUSES)),
+      "Changed By": Schema.select(opts(PEOPLE)),
+      Task: Schema.relation("taskPoints", { twoWay: true, relatedPropertyName: "Status History" }),
       Changed: Schema.date(),
       URL: Schema.url(),
     },
@@ -107,7 +123,8 @@ const worklogs = worker.database("worklogs", {
       "Worklog ID": Schema.richText(),
       "Work Item": Schema.richText(),
       "Work Item Summary": Schema.richText(),
-      Author: Schema.richText(),
+      Author: Schema.select(opts(PEOPLE)),
+      Task: Schema.relation("taskPoints", { twoWay: true, relatedPropertyName: "Worklogs" }),
       "Time Spent": Schema.richText(),
       Hours: Schema.number(),
       Started: Schema.date(),
@@ -148,14 +165,14 @@ const taskPoints = worker.database("taskPoints", {
       "Work Item": Schema.richText(),
       "Story Points": Schema.number(),
       Estimated: Schema.checkbox(),
-      Status: Schema.select([]),
+      Status: Schema.select(opts(STATUSES)),
       "Status Category": Schema.select([
         { name: "To Do", color: "gray" },
         { name: "In Progress", color: "blue" },
         { name: "Done", color: "green" },
       ]),
-      Type: Schema.select([]),
-      Assignee: Schema.richText(),
+      Type: Schema.select(opts(TYPES)),
+      Assignee: Schema.select(opts(PEOPLE)),
       Sprint: Schema.richText(),
       Parent: Schema.richText(),
       "Original Estimate (h)": Schema.number(),
@@ -197,7 +214,7 @@ function defineSync<T>(
       schedule,
       execute: async (state: State) => {
         const { items, nextToken } = await fetchPage(mode, state?.token)
-        const changes = items.flatMap(toChanges).map((c) => ({ type: "upsert" as const, ...c }))
+        const changes = items.flatMap(toChanges).map((c) => ({ type: "upsert" as const, ...c, upstreamUpdatedAt: stamp(c.upstreamUpdatedAt) }))
         return {
           changes,
           hasMore: Boolean(nextToken),
@@ -247,7 +264,8 @@ defineSync<any>(
           "Comment ID": Builder.richText(`${c.issue.key}:${c.id}`),
           "Work Item": Builder.richText(c.issue.key),
           "Work Item Summary": Builder.richText(c.issue.summary),
-          Author: Builder.richText(c.author?.displayName ?? ""),
+          Author: Builder.select(pick(c.author?.displayName, PEOPLE)),
+          Task: [Builder.relation(c.issue.key)],
           Created: Builder.dateTime(c.created),
           Updated: Builder.dateTime(c.updated),
           URL: Builder.url(`${browse(c.issue.key)}?focusedCommentId=${c.id}`),
@@ -281,9 +299,10 @@ defineSync<any>(
           "Change ID": Builder.richText(`${h.issue.key}:${h.id}`),
           "Work Item": Builder.richText(h.issue.key),
           "Work Item Summary": Builder.richText(h.issue.summary),
-          From: Builder.select(item.fromString ?? "None"),
-          To: Builder.select(item.toString ?? "None"),
-          "Changed By": Builder.richText(h.author?.displayName ?? ""),
+          From: Builder.select(pick(item.fromString, STATUSES)),
+          To: Builder.select(pick(item.toString, STATUSES)),
+          "Changed By": Builder.select(pick(h.author?.displayName, PEOPLE)),
+          Task: [Builder.relation(h.issue.key)],
           Changed: Builder.dateTime(h.created),
           URL: Builder.url(browse(h.issue.key)),
         },
@@ -319,7 +338,8 @@ defineSync<any>(
           "Worklog ID": Builder.richText(`${w.issue.key}:${w.id}`),
           "Work Item": Builder.richText(w.issue.key),
           "Work Item Summary": Builder.richText(w.issue.summary),
-          Author: Builder.richText(w.author?.displayName ?? ""),
+          Author: Builder.select(pick(w.author?.displayName, PEOPLE)),
+          Task: [Builder.relation(w.issue.key)],
           "Time Spent": Builder.richText(w.timeSpent ?? ""),
           Hours: Builder.number(Math.round(((w.timeSpentSeconds ?? 0) / 3600) * 100) / 100),
           Started: Builder.dateTime(w.started),
@@ -395,7 +415,7 @@ defineSync<any>(
         Sprint: Builder.title(s.name),
         "Sprint ID": Builder.richText(String(s.id)),
         State: Builder.select(s.state),
-        Board: Builder.richText(s.boardName),
+        Board: Builder.richText(s.boardName ?? ""),
         Goal: Builder.richText(clip(s.goal)),
         ...(s.startDate ? { Start: Builder.dateTime(s.startDate) } : {}),
         ...(s.endDate ? { End: Builder.dateTime(s.endDate) } : {}),
@@ -441,12 +461,12 @@ defineSync<any>(
           "Work Item": Builder.richText(i.key),
           "Story Points": Builder.number(points ?? 0),
           Estimated: Builder.checkbox(points != null),
-          Status: Builder.select(f.status?.name ?? "Unknown"),
+          Status: Builder.select(pick(f.status?.name ?? "Unknown", STATUSES)),
           "Status Category": Builder.select(
             ({ new: "To Do", indeterminate: "In Progress", done: "Done" } as Record<string, string>)[f.status?.statusCategory?.key] ?? "To Do",
           ),
-          Type: Builder.select(f.issuetype?.name ?? "Task"),
-          Assignee: Builder.richText(f.assignee?.displayName ?? "Unassigned"),
+          Type: Builder.select(pick(f.issuetype?.name ?? "Task", TYPES)),
+          Assignee: Builder.select(pick(f.assignee?.displayName ?? "Unassigned", PEOPLE)),
           Sprint: Builder.richText(sprint?.name ?? ""),
           Parent: Builder.richText(f.parent?.key ?? ""),
           "Original Estimate (h)": Builder.number(hours(f.timeoriginalestimate)),

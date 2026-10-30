@@ -16,6 +16,16 @@ import { BASE_URL, adfToText, customFieldIds, jira, searchIssues, storyPoints } 
 type Pacer = { wait: () => Promise<void> }
 type Ids = { points: string[]; sprint?: string }
 
+/** Select options are fixed in the schema; values outside a list fall back to "Other". */
+const STATUSES = ["To Do", "未着手", "進行中", "品質保証", "完了", "Stuck", "In Progress", "Done", "Unknown"]
+const TYPES = ["エピック", "ストーリー", "タスク", "バグ", "ワークストリーム", "Subtask", "Epic", "Story", "Task", "Bug"]
+const PRIORITIES = ["Highest", "High", "Medium", "Low", "Lowest", "None"]
+const LINK_TYPES = ["Blocks", "Relates", "Duplicate", "Clones"]
+const PEOPLE = ["Melanie Harrington", "Marta Giambrone", "Antoine Richert", "Bret Scofield", "Edward Leblanc", "Sales demo", "Renee Ward", "Holly Turay", "Satoshi Suzuki", "Oriana Munoz", "Joseph Roberts", "Alice Antonelli", "Ana Haubold", "Stephanie Lee", "Sandra Lukac", "austen", "Juan Gomez", "Emily Zhang", "Sales Demo - Microsoft", "Unassigned"]
+const opts = (names: string[]) => [...names, "Other"].map((name) => ({ name }))
+const pick = (value: string | null | undefined, names: string[]) =>
+	value && names.includes(value) ? value : "Other"
+
 const browse = (key: string) => `${BASE_URL}/browse/${key}`
 const DAY = 86_400_000
 const hrs = (sec?: number | null) => Math.round(((sec ?? 0) / 3600) * 100) / 100
@@ -48,16 +58,16 @@ export function registerUseCases(worker: Worker, jiraApi: Pacer) {
       properties: {
         "Work Item": Schema.title(),
         Key: Schema.richText(),
-        Status: Schema.select([]),
+        Status: Schema.select(opts(STATUSES)),
         "Status Category": Schema.select([
           { name: "To Do", color: "gray" },
           { name: "In Progress", color: "blue" },
           { name: "Done", color: "green" },
         ]),
-        Type: Schema.select([]),
-        Priority: Schema.select([]),
+        Type: Schema.select(opts(TYPES)),
+        Priority: Schema.select(opts(PRIORITIES)),
         "Story Points": Schema.number(),
-        Assignee: Schema.richText(),
+        Assignee: Schema.select(opts(PEOPLE)),
         Due: Schema.date(),
         Created: Schema.date(),
         Updated: Schema.date(),
@@ -115,7 +125,7 @@ export function registerUseCases(worker: Worker, jiraApi: Pacer) {
         Epic: Schema.title(),
         Key: Schema.richText(),
         Project: Schema.richText(),
-        Status: Schema.select([]),
+        Status: Schema.select(opts(STATUSES)),
         "Child Items": Schema.number(),
         "Done Items": Schema.number(),
         "Points Total": Schema.number(),
@@ -178,9 +188,9 @@ export function registerUseCases(worker: Worker, jiraApi: Pacer) {
       properties: {
         Dependency: Schema.title(),
         Link: Schema.richText(),
-        "Link Type": Schema.select([]),
-        "Blocker Status": Schema.select([]),
-        "Blocker Assignee": Schema.richText(),
+        "Link Type": Schema.select(opts(LINK_TYPES)),
+        "Blocker Status": Schema.select(opts(STATUSES)),
+        "Blocker Assignee": Schema.select(opts(PEOPLE)),
         "Active Blocker": Schema.checkbox(),
         "Items Waiting": Schema.number(),
         Blocker: Schema.relation("ucWorkItems", { twoWay: true, relatedPropertyName: "Blocks" }),
@@ -283,12 +293,12 @@ export function registerUseCases(worker: Worker, jiraApi: Pacer) {
       properties: {
         "Work Item": Builder.title(`${issue.key}: ${f.summary ?? ""}`),
         Key: Builder.richText(issue.key),
-        Status: Builder.select(f.status?.name ?? "Unknown"),
+        Status: Builder.select(pick(f.status?.name ?? "Unknown", STATUSES)),
         "Status Category": Builder.select(catName(f.status?.statusCategory?.key)),
-        Type: Builder.select(f.issuetype?.name ?? "Task"),
-        Priority: Builder.select(f.priority?.name ?? "None"),
+        Type: Builder.select(pick(f.issuetype?.name ?? "Task", TYPES)),
+        Priority: Builder.select(pick(f.priority?.name ?? "None", PRIORITIES)),
         "Story Points": Builder.number(points ?? 0),
-        Assignee: Builder.richText(f.assignee?.displayName ?? "Unassigned"),
+        Assignee: Builder.select(pick(f.assignee?.displayName ?? "Unassigned", PEOPLE)),
         Due: f.duedate ? Builder.date(f.duedate) : (undefined as any),
         Created: Builder.dateTime(f.created),
         Updated: Builder.dateTime(f.updated),
@@ -399,7 +409,7 @@ export function registerUseCases(worker: Worker, jiraApi: Pacer) {
         properties: {
           Sprint: Builder.title(s.name),
           "Sprint ID": Builder.richText(String(s.id)),
-          Board: Builder.richText(s.board ?? ""),
+          ...(s.board ? { Board: Builder.richText(s.board ?? "") } : {}),
           State: Builder.select(s.state),
           Goal: Builder.richText((s.goal ?? "").slice(0, 1900)),
           Start: s.startDate ? Builder.dateTime(s.startDate) : (undefined as any),
@@ -455,7 +465,7 @@ export function registerUseCases(worker: Worker, jiraApi: Pacer) {
           Epic: Builder.title(`${epic.key}: ${f.summary ?? ""}`),
           Key: Builder.richText(epic.key),
           Project: Builder.richText(f.project?.key ?? ""),
-          Status: Builder.select(f.status?.name ?? "Unknown"),
+          Status: Builder.select(pick(f.status?.name ?? "Unknown", STATUSES)),
           "Child Items": Builder.number(kids.length),
           "Done Items": Builder.number(done.length),
           "Points Total": Builder.number(total),
@@ -610,9 +620,9 @@ export function registerUseCases(worker: Worker, jiraApi: Pacer) {
       properties: {
         Dependency: Builder.title(`${p.blocker} ${p.type === "Blocks" ? "blocks" : "relates to"} ${p.blocked}`),
         Link: Builder.richText(p.k),
-        "Link Type": Builder.select(p.type),
-        "Blocker Status": Builder.select(p.bi?.fields.status?.name ?? "Unknown"),
-        "Blocker Assignee": Builder.richText(p.bi?.fields.assignee?.displayName ?? "Unassigned"),
+        "Link Type": Builder.select(pick(p.type, LINK_TYPES)),
+        "Blocker Status": Builder.select(pick(p.bi?.fields.status?.name ?? "Unknown", STATUSES)),
+        "Blocker Assignee": Builder.select(pick(p.bi?.fields.assignee?.displayName ?? "Unassigned", PEOPLE)),
         "Active Blocker": Builder.checkbox(p.active),
         "Items Waiting": Builder.number(p.waiting),
         Blocker: [Builder.relation(p.blocker)],
