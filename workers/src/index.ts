@@ -1,5 +1,5 @@
 /**
- * gh-demo-worker: extends Notion's native GitHub Sync (PRs + issues) with
+ * GitHub worker: extends Notion's native GitHub Sync (PRs + issues) with
  * commits, releases, workflow runs, PR reviews, and agent tools that write
  * back to GitHub. Each synced row also gets a page body (pageContentMarkdown)
  * with the details that do not fit into properties.
@@ -9,17 +9,31 @@ import * as Builder from "@notionhq/workers/builder"
 import * as Schema from "@notionhq/workers/schema"
 import { j } from "@notionhq/workers/schema-builder"
 import { REPO, gh, ghPage } from "./github.js"
+import { registerUseCases } from "./usecases.js"
 
 const worker = new Worker()
 export default worker
 
 const githubApi = worker.pacer("githubApi", { allowedRequests: 10, intervalMs: 1000 })
 
+registerUseCases(worker, githubApi)
+
+/** Select options are fixed in the schema; values outside a list fall back to "Other". */
+const PEOPLE = ["satoshi-notion", "satoshi0817", "jay23606", "Satoshi Suzuki"]
+const EVENTS = ["push", "pull_request", "workflow_dispatch", "schedule"]
+const opts = (names: string[]) => [...names, "Other"].map((name) => ({ name }))
+const pick = (value: string | null | undefined, names: string[]) =>
+	value && names.includes(value) ? value : "Other"
+
+/** Bump when a schema or value format changes, so unchanged rows are rewritten once. */
+const SCHEMA_REV = "2026-10-30T18:00:00.000Z"
+const stamp = (d?: string) => (d && new Date(d) > new Date(SCHEMA_REV) ? d : SCHEMA_REV)
+
 // -- Databases (managed; move them under the demo page after first deploy) --
 
 const commits = worker.database("commits", {
   type: "managed",
-  initialTitle: "gh-demo Commits",
+  initialTitle: "Commits",
   primaryKeyProperty: "SHA",
   schema: {
     properties: {
@@ -27,7 +41,7 @@ const commits = worker.database("commits", {
       // Full SHA: must equal the sync key, otherwise every run creates duplicates.
       SHA: Schema.richText(),
       "Short SHA": Schema.richText(),
-      Author: Schema.richText(),
+      Author: Schema.select(opts(PEOPLE)),
       Committed: Schema.date(),
       Description: Schema.richText(),
       "Files Changed": Schema.number(),
@@ -41,7 +55,7 @@ const commits = worker.database("commits", {
 
 const releases = worker.database("releases", {
   type: "managed",
-  initialTitle: "gh-demo Releases",
+  initialTitle: "Releases",
   primaryKeyProperty: "Release ID",
   schema: {
     properties: {
@@ -50,7 +64,7 @@ const releases = worker.database("releases", {
       Tag: Schema.richText(),
       Published: Schema.date(),
       Prerelease: Schema.checkbox(),
-      Author: Schema.richText(),
+      Author: Schema.select(opts(PEOPLE)),
       Notes: Schema.richText(),
       URL: Schema.url(),
     },
@@ -59,7 +73,7 @@ const releases = worker.database("releases", {
 
 const runs = worker.database("runs", {
   type: "managed",
-  initialTitle: "gh-demo Workflow Runs",
+  initialTitle: "Workflow Runs",
   primaryKeyProperty: "Run ID",
   schema: {
     properties: {
@@ -77,8 +91,8 @@ const runs = worker.database("runs", {
         { name: "skipped", color: "gray" },
       ]),
       Branch: Schema.richText(),
-      Event: Schema.richText(),
-      Actor: Schema.richText(),
+      Event: Schema.select(opts(EVENTS)),
+      Actor: Schema.select(opts(PEOPLE)),
       Commit: Schema.richText(),
       "Commit Record": Schema.relation("commits", { twoWay: true, relatedPropertyName: "Workflow Runs" }),
       "Failed Step": Schema.richText(),
@@ -90,7 +104,7 @@ const runs = worker.database("runs", {
 
 const reviews = worker.database("reviews", {
   type: "managed",
-  initialTitle: "gh-demo PR Reviews",
+  initialTitle: "PR Reviews",
   primaryKeyProperty: "Review ID",
   schema: {
     properties: {
@@ -98,7 +112,7 @@ const reviews = worker.database("reviews", {
       "Review ID": Schema.richText(),
       "PR Number": Schema.number(),
       "PR Title": Schema.richText(),
-      Reviewer: Schema.richText(),
+      Reviewer: Schema.select(opts(PEOPLE)),
       State: Schema.select([
         { name: "APPROVED", color: "green" },
         { name: "CHANGES_REQUESTED", color: "red" },
@@ -152,7 +166,7 @@ function defineSync<T>(
         const changes = []
         for (const item of items) {
           const c = await toChange(item)
-          if (c) changes.push({ type: "upsert" as const, ...c })
+          if (c) changes.push({ type: "upsert" as const, ...c, upstreamUpdatedAt: stamp(c.upstreamUpdatedAt) })
         }
         return { changes, hasMore, nextState: hasMore ? { page: page + 1 } : undefined }
       },
@@ -193,7 +207,7 @@ defineSync<any>(
         Message: Builder.title(String(c.commit.message).split("\n")[0]),
         SHA: Builder.richText(c.sha),
         "Short SHA": Builder.richText(c.sha.slice(0, 7)),
-        Author: Builder.richText(c.commit.author?.name ?? c.author?.login ?? "unknown"),
+        Author: Builder.select(pick(c.commit.author?.name ?? c.author?.login, PEOPLE)),
         Committed: Builder.dateTime(c.commit.author.date),
         Description: Builder.richText(clip(body)),
         "Files Changed": Builder.number(files.length),
@@ -221,7 +235,7 @@ defineSync<any>(
       Tag: Builder.richText(r.tag_name),
       Published: Builder.dateTime(r.published_at ?? r.created_at),
       Prerelease: Builder.checkbox(Boolean(r.prerelease)),
-      Author: Builder.richText(r.author?.login ?? ""),
+      Author: Builder.select(pick(r.author?.login, PEOPLE)),
       Notes: Builder.richText(clip(r.body)),
       URL: Builder.url(r.html_url),
     },
@@ -274,8 +288,8 @@ defineSync<any>(
         Status: Builder.select(r.status),
         ...(r.conclusion ? { Conclusion: Builder.select(r.conclusion) } : {}),
         Branch: Builder.richText(r.head_branch ?? ""),
-        Event: Builder.richText(r.event),
-        Actor: Builder.richText(r.triggering_actor?.login ?? r.actor?.login ?? ""),
+        Event: Builder.select(pick(r.event, EVENTS)),
+        Actor: Builder.select(pick(r.triggering_actor?.login ?? r.actor?.login, PEOPLE)),
         Commit: Builder.richText(r.head_sha.slice(0, 7)),
         ...(onMain ? { "Commit Record": [Builder.relation(r.head_sha)] } : {}),
         "Failed Step": Builder.richText(failed),
@@ -315,7 +329,7 @@ defineSync<any>(
       "Review ID": Builder.richText(String(r.id)),
       "PR Number": Builder.number(r.pr.number),
       "PR Title": Builder.richText(r.pr.title),
-      Reviewer: Builder.richText(r.user.login),
+      Reviewer: Builder.select(pick(r.user.login, PEOPLE)),
       State: Builder.select(r.state),
       Comment: Builder.richText(clip(r.body)),
       "Inline Comments": Builder.number(r.inline.length),
