@@ -45,3 +45,8 @@ test("list filters by priority and done", () => {
   assert.equal(store.list({ priority: "high", done: true }).length, 0);
   assert.equal(store.list().length, 2);
 });
+
+test("create rejects a due date in the past", () => {
+  const store = new TaskStore();
+  assert.throws(() => store.create({ title: "late", due: "2000-01-01" }), ValidationError);
+});
