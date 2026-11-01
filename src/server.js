@@ -1,5 +1,5 @@
 import { createServer } from "node:http";
-import { TaskStore, ValidationError, BadJsonError } from "./store.js";
+import { TaskStore, ValidationError, BadJsonError, PRIORITIES } from "./store.js";
 
 const store = new TaskStore();
 
@@ -30,10 +30,15 @@ export function createApp(taskStore = store) {
     try {
       if (req.method === "GET" && !id) {
         const q = url.searchParams;
-        return send(res, 200, taskStore.list({
-          priority: q.get("priority") ?? undefined,
-          done: q.has("done") ? q.get("done") === "true" : undefined,
-        }));
+        const priority = q.get("priority") ?? undefined;
+        if (priority !== undefined && !PRIORITIES.includes(priority)) {
+          throw new ValidationError(`priority must be one of: ${PRIORITIES.join(", ")}`);
+        }
+        const done = q.get("done");
+        if (done !== null && done !== "true" && done !== "false") {
+          throw new ValidationError("done must be true or false");
+        }
+        return send(res, 200, taskStore.list({ priority, done: done === null ? undefined : done === "true" }));
       }
       if (req.method === "POST" && !id) {
         return send(res, 201, taskStore.create(await readJson(req)));

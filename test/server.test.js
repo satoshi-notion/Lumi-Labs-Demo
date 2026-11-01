@@ -39,3 +39,11 @@ test("POST /tasks with a valid body still returns 201", async () => {
     assert.equal(res.status, 201);
   });
 });
+
+test("GET /tasks rejects invalid filter values", async () => {
+  await withServer(async (base) => {
+    assert.equal((await fetch(`${base}/tasks?done=yes`)).status, 400);
+    assert.equal((await fetch(`${base}/tasks?priority=urgent`)).status, 400);
+    assert.equal((await fetch(`${base}/tasks?priority=high&done=false`)).status, 200);
+  });
+});
