@@ -9,15 +9,19 @@ export class BadJsonError extends Error {}
 export class TaskStore {
   #tasks = new Map();
 
-  create({ title, priority = "medium" }) {
+  create({ title, priority = "medium", tags = [] }) {
     if (typeof title !== "string" || title.trim() === "") {
       throw new ValidationError("title is required");
     }
     if (!PRIORITIES.includes(priority)) {
       throw new ValidationError(`priority must be one of: ${PRIORITIES.join(", ")}`);
     }
+    if (!Array.isArray(tags) || tags.some((t) => typeof t !== "string" || t.trim() === "")) {
+      throw new ValidationError("tags must be a list of non-empty strings");
+    }
     const task = {
       id: randomUUID(),
+      tags: [...new Set(tags.map((t) => t.trim().toLowerCase()))],
       title: title.trim(),
       priority,
       done: false,

@@ -45,3 +45,10 @@ test("list filters by priority and done", () => {
   assert.equal(store.list({ priority: "high", done: true }).length, 0);
   assert.equal(store.list().length, 2);
 });
+
+test("create normalizes tags", () => {
+  const store = new TaskStore();
+  const task = store.create({ title: "x", tags: [" Bug ", "bug", "API"] });
+  assert.deepEqual(task.tags, ["bug", "api"]);
+  assert.throws(() => store.create({ title: "y", tags: ["", "z"] }), ValidationError);
+});
