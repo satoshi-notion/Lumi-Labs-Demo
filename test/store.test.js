@@ -35,6 +35,23 @@ test("priority defaults to medium and rejects unknown values", () => {
   assert.throws(() => store.create({ title: "C", priority: "urgent" }), ValidationError);
 });
 
+test("create and update normalize task tags", () => {
+  const store = new TaskStore();
+  const task = store.create({ title: "Tagged", tags: ["  Docs ", "API"] });
+  assert.deepEqual(task.tags, ["docs", "api"]);
+  assert.deepEqual(store.update(task.id, { tags: ["  Ship "] }).tags, ["ship"]);
+});
+
+test("create and update reject blank or non-string tags", () => {
+  const store = new TaskStore();
+  assert.throws(() => store.create({ title: "Blank tag", tags: ["   "] }), ValidationError);
+  assert.throws(() => store.create({ title: "Numeric tag", tags: [123] }), ValidationError);
+
+  const task = store.create({ title: "Tagged" });
+  assert.throws(() => store.update(task.id, { tags: ["   "] }), ValidationError);
+  assert.throws(() => store.update(task.id, { tags: [123] }), ValidationError);
+});
+
 test("list filters by priority and done", () => {
   const store = new TaskStore();
   store.create({ title: "a", priority: "high" });
